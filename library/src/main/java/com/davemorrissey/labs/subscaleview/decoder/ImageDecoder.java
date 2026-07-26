@@ -51,7 +51,7 @@ public class ImageDecoder implements Decoder {
         InputStream inputStream = null;
         try {
             inputStream = provider.openStream();
-            decoder = tachiyomi.decoder.ImageDecoder.Companion.newInstance(inputStream, cropBorders);
+            decoder = tachiyomi.decoder.ImageDecoder.Companion.newInstance(inputStream, cropBorders, null);
         } finally {
             if (inputStream != null) {
                 try {
@@ -80,9 +80,9 @@ public class ImageDecoder implements Decoder {
      */
     @NonNull
     public Bitmap decodeRegion(@NonNull Rect sRect, int sampleSize) {
-        boolean config = getImageConfig();
-
-        Bitmap bitmap = decoder.decode(sRect, config, sampleSize);
+        // The native decoder no longer supports an RGB_565 output config; it always
+        // decodes to ARGB_8888, so bitmapConfig/getImageConfig() no longer affect this.
+        Bitmap bitmap = decoder.decode(sRect, sampleSize);
 
         if (bitmap != null) {
             return bitmap;
@@ -106,16 +106,5 @@ public class ImageDecoder implements Decoder {
      */
     public void recycle() {
         decoder.recycle();
-    }
-
-    /**
-     * Returns image config from subsampling view configuration.
-     */
-    private boolean getImageConfig() {
-        boolean rgb565 = true;
-        if (bitmapConfig != null && bitmapConfig.equals(Bitmap.Config.ARGB_8888)) {
-            rgb565 = false;
-        }
-        return rgb565;
     }
 }
