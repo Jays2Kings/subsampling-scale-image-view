@@ -976,7 +976,6 @@ public class SubsamplingScaleImageView extends View {
     
             canvas.drawBitmap(eink256Bitmap, 0, 0, null);
     
-            drawDebug(canvas);
             return;
         }
     
@@ -985,7 +984,6 @@ public class SubsamplingScaleImageView extends View {
          */
         if (moving) {
             drawOriginal(canvas);
-            drawDebug(canvas);
             return;
         }
     
@@ -1010,7 +1008,6 @@ public class SubsamplingScaleImageView extends View {
         if (!complete) {
             canvas.drawBitmap(sourceBitmap, 0, 0, null);
             sourceBitmap.recycle();
-            drawDebug(canvas);
             return;
         }
     
@@ -1047,7 +1044,6 @@ public class SubsamplingScaleImageView extends View {
             }
         }
     
-        drawDebug(canvas);
     }
     /**
      * Original image rendering logic.
