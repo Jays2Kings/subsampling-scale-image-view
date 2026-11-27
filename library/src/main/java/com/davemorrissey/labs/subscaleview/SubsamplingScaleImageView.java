@@ -1190,7 +1190,7 @@ public class SubsamplingScaleImageView extends View {
      */
     @Nullable
     private Bitmap processWithEink256(@NonNull Bitmap bitmap) {
-    
+        Log.d(TAG, "Eink256: processWithEink256 called");
         try {
     
             if (!eink256ProcessMethodChecked) {
