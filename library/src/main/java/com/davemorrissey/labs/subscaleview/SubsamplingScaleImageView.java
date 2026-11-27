@@ -1189,7 +1189,7 @@ public class SubsamplingScaleImageView extends View {
         return complete;
     }
     /**
-     * Calls the application's Eink256Patch without introducing
+     * Calls the application's Eink256Native without introducing
      * a compile-time dependency from this library to the application.
      */
     @Nullable
