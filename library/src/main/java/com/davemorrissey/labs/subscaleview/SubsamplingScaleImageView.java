@@ -34,6 +34,7 @@ import com.davemorrissey.labs.subscaleview.decoder.ImageDecoder;
 import com.davemorrissey.labs.subscaleview.provider.InputProvider;
 
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -247,6 +248,15 @@ public class SubsamplingScaleImageView extends View {
     private Paint debugTextPaint;
     private Paint debugLinePaint;
     private Paint tileBgPaint;
+    
+    // E-Ink 256 gray dithering cache
+    private Bitmap eink256Bitmap;
+    private float eink256CacheScale = Float.NaN;
+    private float eink256CacheTranslateX = Float.NaN;
+    private float eink256CacheTranslateY = Float.NaN;
+    
+    private static Method eink256ProcessMethod;
+    private static boolean eink256ProcessMethodChecked = false;
     // Volatile fields used to reduce object creation
     private ScaleAndTranslate satTemp;
     private Matrix matrix;
@@ -374,6 +384,8 @@ public class SubsamplingScaleImageView extends View {
      */
     private void reset(boolean newImage) {
         debug("reset newImage=" + newImage);
+    
+        clearEink256Cache();
         scale = 0f;
         scaleStart = 0f;
         vTranslate = null;
@@ -503,6 +515,8 @@ public class SubsamplingScaleImageView extends View {
     @Override
     protected void onSizeChanged(int w, int h, int oldw, int oldh) {
         debug("onSizeChanged %dx%d -> %dx%d", oldw, oldh, w, h);
+    
+        clearEink256Cache();
         PointF sCenter = getCenter();
         if (readySent && sCenter != null) {
             this.anim = null;
@@ -867,52 +881,73 @@ public class SubsamplingScaleImageView extends View {
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
         createPaints();
-
+    
         // If image or view dimensions are not known yet, abort.
         if (sWidth == 0 || sHeight == 0 || getWidth() == 0 || getHeight() == 0) {
             return;
         }
-
-        // When using tiles, on first render with no tile map ready, initialise it and kick off async base image loading.
+    
+        // When using tiles, on first render with no tile map ready, initialise it
+        // and kick off async base image loading.
         if (tileMap == null && decoder != null) {
             initialiseBaseLayer(getMaxBitmapDimensions(canvas));
         }
-
-        // If image has been loaded or supplied as a bitmap, onDraw may be the first time the view has
-        // dimensions and therefore the first opportunity to set scale and translate. If this call returns
-        // false there is nothing to be drawn so return immediately.
+    
+        // If image is not ready, there is nothing to draw.
         if (!checkReady()) {
             return;
         }
-
+    
         // Set scale and translate before draw.
         preDraw();
-
-        // If animating scale, calculate current scale and center with easing equations
+    
+        // If animating scale, calculate current scale and center with easing equations.
         if (anim != null && anim.vFocusStart != null) {
-            // Store current values so we can send an event if they change
             float scaleBefore = scale;
+    
             if (vTranslateBefore == null) {
                 vTranslateBefore = new PointF(0, 0);
             }
+    
             vTranslateBefore.set(vTranslate);
-
+    
             long scaleElapsed = System.currentTimeMillis() - anim.time;
             boolean finished = scaleElapsed > anim.duration;
             scaleElapsed = Math.min(scaleElapsed, anim.duration);
-            scale = ease(anim.easing, scaleElapsed, anim.scaleStart, anim.scaleEnd - anim.scaleStart, anim.duration);
-
-            // Apply required animation to the focal point
-            float vFocusNowX = ease(anim.easing, scaleElapsed, anim.vFocusStart.x, anim.vFocusEnd.x - anim.vFocusStart.x, anim.duration);
-            float vFocusNowY = ease(anim.easing, scaleElapsed, anim.vFocusStart.y, anim.vFocusEnd.y - anim.vFocusStart.y, anim.duration);
-            // Find out where the focal point is at this scale and adjust its position to follow the animation path
+    
+            scale = ease(
+                    anim.easing,
+                    scaleElapsed,
+                    anim.scaleStart,
+                    anim.scaleEnd - anim.scaleStart,
+                    anim.duration
+            );
+    
+            float vFocusNowX = ease(
+                    anim.easing,
+                    scaleElapsed,
+                    anim.vFocusStart.x,
+                    anim.vFocusEnd.x - anim.vFocusStart.x,
+                    anim.duration
+            );
+    
+            float vFocusNowY = ease(
+                    anim.easing,
+                    scaleElapsed,
+                    anim.vFocusStart.y,
+                    anim.vFocusEnd.y - anim.vFocusStart.y,
+                    anim.duration
+            );
+    
             vTranslate.x -= sourceToViewX(anim.sCenterEnd.x) - vFocusNowX;
             vTranslate.y -= sourceToViewY(anim.sCenterEnd.y) - vFocusNowY;
-
-            // For translate anims, showing the image non-centered is never allowed, for scaling anims it is during the animation.
+    
             fitToBounds(finished || (anim.scaleStart == anim.scaleEnd));
+    
             sendStateChanged(scaleBefore, vTranslateBefore, anim.origin);
+    
             refreshRequiredTiles(finished);
+    
             if (finished) {
                 if (anim.listener != null) {
                     try {
@@ -923,16 +958,117 @@ public class SubsamplingScaleImageView extends View {
                 }
                 anim = null;
             }
+    
             invalidate();
         }
-
+    
+        /*
+         * During panning, zooming and animation, draw normally.
+         * Do not run the expensive E-Ink dithering process here.
+         */
+        boolean moving = isPanning || isZooming || isQuickScaling || anim != null;
+    
+        if (!moving && eink256Bitmap != null
+                && !eink256Bitmap.isRecycled()
+                && Float.compare(eink256CacheScale, scale) == 0
+                && Float.compare(eink256CacheTranslateX, vTranslate.x) == 0
+                && Float.compare(eink256CacheTranslateY, vTranslate.y) == 0) {
+    
+            canvas.drawBitmap(eink256Bitmap, 0, 0, null);
+    
+            drawDebug(canvas);
+            return;
+        }
+    
+        /*
+         * During movement, always use the original renderer.
+         */
+        if (moving) {
+            drawOriginal(canvas);
+            drawDebug(canvas);
+            return;
+        }
+    
+        /*
+         * Static state:
+         * Render the current screen into an off-screen ARGB_8888 bitmap first.
+         */
+        Bitmap sourceBitmap = Bitmap.createBitmap(
+                getWidth(),
+                getHeight(),
+                Bitmap.Config.ARGB_8888
+        );
+    
+        Canvas offscreenCanvas = new Canvas(sourceBitmap);
+    
+        boolean complete = drawOriginal(offscreenCanvas);
+    
+        /*
+         * If the required high-resolution tiles are still loading,
+         * do not cache an incomplete image and do not run dithering yet.
+         */
+        if (!complete) {
+            canvas.drawBitmap(sourceBitmap, 0, 0, null);
+            sourceBitmap.recycle();
+            drawDebug(canvas);
+            return;
+        }
+    
+        /*
+         * Run the 256-level E-Ink dithering.
+         */
+        Bitmap processedBitmap = processWithEink256(sourceBitmap);
+    
+        if (processedBitmap != null && !processedBitmap.isRecycled()) {
+    
+            if (processedBitmap != sourceBitmap
+                    && !sourceBitmap.isRecycled()) {
+                sourceBitmap.recycle();
+            }
+    
+            clearEink256CacheOnly();
+    
+            eink256Bitmap = processedBitmap;
+            eink256CacheScale = scale;
+            eink256CacheTranslateX = vTranslate.x;
+            eink256CacheTranslateY = vTranslate.y;
+    
+            canvas.drawBitmap(eink256Bitmap, 0, 0, null);
+    
+        } else {
+            /*
+             * If the native processor is unavailable or failed,
+             * fall back to the original image.
+             */
+            canvas.drawBitmap(sourceBitmap, 0, 0, null);
+    
+            if (!sourceBitmap.isRecycled()) {
+                sourceBitmap.recycle();
+            }
+        }
+    
+        drawDebug(canvas);
+    }
+    /**
+     * Original image rendering logic.
+     *
+     * @return true when the currently required image content is complete.
+     */
+    private boolean drawOriginal(Canvas canvas) {
+    
+        boolean complete = true;
+    
         if (tileMap != null && isBaseLayerReady()) {
-
-            // Optimum sample size for current scale
-            int sampleSize = Math.min(fullImageSampleSize, calculateInSampleSize(scale));
-
-            // First check for missing tiles - if there are any we need the base layer underneath to avoid gaps
+    
+            // Optimum sample size for current scale.
+            int sampleSize = Math.min(
+                    fullImageSampleSize,
+                    calculateInSampleSize(scale)
+            );
+    
+            // First check for missing tiles.
             boolean hasMissingTiles = false;
+    
             for (Map.Entry<Integer, List<Tile>> tileMapEntry : tileMap.entrySet()) {
                 if (tileMapEntry.getKey() == sampleSize) {
                     for (Tile tile : tileMapEntry.getValue()) {
@@ -942,97 +1078,202 @@ public class SubsamplingScaleImageView extends View {
                     }
                 }
             }
-
-            // Render all loaded tiles. LinkedHashMap used for bottom up rendering - lower res tiles underneath.
+    
+            complete = !hasMissingTiles;
+    
+            // Render all loaded tiles.
             for (Map.Entry<Integer, List<Tile>> tileMapEntry : tileMap.entrySet()) {
+    
                 if (tileMapEntry.getKey() == sampleSize || hasMissingTiles) {
+    
                     for (Tile tile : tileMapEntry.getValue()) {
+    
                         sourceToViewRect(tile.sRect, tile.vRect);
+    
                         if (!tile.loading && tile.bitmap != null) {
+    
                             if (tileBgPaint != null) {
                                 canvas.drawRect(tile.vRect, tileBgPaint);
                             }
+    
                             if (matrix == null) {
                                 matrix = new Matrix();
                             }
+    
                             matrix.reset();
-                            setMatrixArray(srcArray, 0, 0, tile.bitmap.getWidth(), 0, tile.bitmap.getWidth(), tile.bitmap.getHeight(), 0, tile.bitmap.getHeight());
-                            setMatrixArray(dstArray, tile.vRect.left, tile.vRect.top, tile.vRect.right, tile.vRect.top, tile.vRect.right, tile.vRect.bottom, tile.vRect.left, tile.vRect.bottom);
-                            matrix.setPolyToPoly(srcArray, 0, dstArray, 0, 4);
-                            canvas.drawBitmap(tile.bitmap, matrix, bitmapPaint);
-                            if (debug) {
-                                canvas.drawRect(tile.vRect, debugLinePaint);
-                            }
-                        } else if (tile.loading && debug) {
-                            canvas.drawText("LOADING", tile.vRect.left + px(5), tile.vRect.top + px(35), debugTextPaint);
-                        }
-                        if (tile.visible && debug) {
-                            canvas.drawText("ISS " + tile.sampleSize + " RECT " + tile.sRect.top + "," + tile.sRect.left + "," + tile.sRect.bottom + "," + tile.sRect.right, tile.vRect.left + px(5), tile.vRect.top + px(15), debugTextPaint);
+    
+                            setMatrixArray(
+                                    srcArray,
+                                    0,
+                                    0,
+                                    tile.bitmap.getWidth(),
+                                    0,
+                                    tile.bitmap.getWidth(),
+                                    tile.bitmap.getHeight(),
+                                    0,
+                                    tile.bitmap.getHeight()
+                            );
+    
+                            setMatrixArray(
+                                    dstArray,
+                                    tile.vRect.left,
+                                    tile.vRect.top,
+                                    tile.vRect.right,
+                                    tile.vRect.top,
+                                    tile.vRect.right,
+                                    tile.vRect.bottom,
+                                    tile.vRect.left,
+                                    tile.vRect.bottom
+                            );
+    
+                            matrix.setPolyToPoly(
+                                    srcArray,
+                                    0,
+                                    dstArray,
+                                    0,
+                                    4
+                            );
+    
+                            canvas.drawBitmap(
+                                    tile.bitmap,
+                                    matrix,
+                                    bitmapPaint
+                            );
+    
                         }
                     }
                 }
             }
-
+    
         } else if (bitmap != null && !bitmap.isRecycled()) {
-
-            float xScale = scale, yScale = scale;
-
+    
+            float xScale = scale;
+            float yScale = scale;
+    
             if (matrix == null) {
                 matrix = new Matrix();
             }
+    
             matrix.reset();
             matrix.postScale(xScale, yScale);
             matrix.postTranslate(vTranslate.x, vTranslate.y);
-
+    
             if (tileBgPaint != null) {
+    
                 if (sRect == null) {
                     sRect = new RectF();
                 }
-                sRect.set(0f, 0f, sWidth, sHeight);
+    
+                sRect.set(
+                        0f,
+                        0f,
+                        sWidth,
+                        sHeight
+                );
+    
                 matrix.mapRect(sRect);
-                canvas.drawRect(sRect, tileBgPaint);
+    
+                canvas.drawRect(
+                        sRect,
+                        tileBgPaint
+                );
             }
-            canvas.drawBitmap(bitmap, matrix, bitmapPaint);
-
+    
+            canvas.drawBitmap(
+                    bitmap,
+                    matrix,
+                    bitmapPaint
+            );
         }
-
-        if (debug) {
-            canvas.drawText("Scale: " + String.format(Locale.ENGLISH, "%.2f", scale) + " (" + String.format(Locale.ENGLISH, "%.2f", minScale()) + " - " + String.format(Locale.ENGLISH, "%.2f", maxScale) + ")", px(5), px(15), debugTextPaint);
-            canvas.drawText("Translate: " + String.format(Locale.ENGLISH, "%.2f", vTranslate.x) + ":" + String.format(Locale.ENGLISH, "%.2f", vTranslate.y), px(5), px(30), debugTextPaint);
-            PointF center = getCenter();
-            //noinspection ConstantConditions
-            canvas.drawText("Source center: " + String.format(Locale.ENGLISH, "%.2f", center.x) + ":" + String.format(Locale.ENGLISH, "%.2f", center.y), px(5), px(45), debugTextPaint);
-            if (anim != null) {
-                PointF vCenterStart = sourceToViewCoord(anim.sCenterStart);
-                PointF vCenterEndRequested = sourceToViewCoord(anim.sCenterEndRequested);
-                PointF vCenterEnd = sourceToViewCoord(anim.sCenterEnd);
-                //noinspection ConstantConditions
-                canvas.drawCircle(vCenterStart.x, vCenterStart.y, px(10), debugLinePaint);
-                debugLinePaint.setColor(Color.RED);
-                //noinspection ConstantConditions
-                canvas.drawCircle(vCenterEndRequested.x, vCenterEndRequested.y, px(20), debugLinePaint);
-                debugLinePaint.setColor(Color.BLUE);
-                //noinspection ConstantConditions
-                canvas.drawCircle(vCenterEnd.x, vCenterEnd.y, px(25), debugLinePaint);
-                debugLinePaint.setColor(Color.CYAN);
-                canvas.drawCircle(getWidth() / 2, getHeight() / 2, px(30), debugLinePaint);
-            }
-            if (vCenterStart != null) {
-                debugLinePaint.setColor(Color.RED);
-                canvas.drawCircle(vCenterStart.x, vCenterStart.y, px(20), debugLinePaint);
-            }
-            if (quickScaleSCenter != null) {
-                debugLinePaint.setColor(Color.BLUE);
-                canvas.drawCircle(sourceToViewX(quickScaleSCenter.x), sourceToViewY(quickScaleSCenter.y), px(35), debugLinePaint);
-            }
-            if (quickScaleVStart != null && isQuickScaling) {
-                debugLinePaint.setColor(Color.CYAN);
-                canvas.drawCircle(quickScaleVStart.x, quickScaleVStart.y, px(30), debugLinePaint);
-            }
-            debugLinePaint.setColor(Color.MAGENTA);
-        }
+    
+        return complete;
     }
-
+    /**
+     * Calls the application's Eink256Patch without introducing
+     * a compile-time dependency from this library to the application.
+     */
+    @Nullable
+    private Bitmap processWithEink256(@NonNull Bitmap bitmap) {
+    
+        try {
+    
+            if (!eink256ProcessMethodChecked) {
+    
+                eink256ProcessMethodChecked = true;
+    
+                Class<?> nativeClass = Class.forName(
+                        "com.zyyme.eink256.Eink256Native"
+                );
+    
+                eink256ProcessMethod = nativeClass.getMethod(
+                        "ditherBitmap",
+                        Bitmap.class
+                );
+            }
+    
+            if (eink256ProcessMethod == null) {
+                return bitmap;
+            }
+    
+            Class<?> nativeClass = Class.forName(
+                    "com.zyyme.eink256.Eink256Native"
+            );
+    
+            Object nativeInstance = nativeClass
+                    .getField("INSTANCE")
+                    .get(null);
+    
+            Object result = eink256ProcessMethod.invoke(
+                    nativeInstance,
+                    bitmap
+            );
+    
+            if (result instanceof Boolean && (Boolean) result) {
+                return bitmap;
+            }
+    
+        } catch (Throwable e) {
+    
+            Log.e(
+                    TAG,
+                    "E-Ink 256 dithering failed",
+                    e
+            );
+    
+            eink256ProcessMethod = null;
+        }
+    
+        return bitmap;
+    }
+    /**
+     * Clears the cached processed bitmap and resets its state.
+     */
+    private void clearEink256Cache() {
+    
+        if (eink256Bitmap != null
+                && !eink256Bitmap.isRecycled()) {
+            eink256Bitmap.recycle();
+        }
+    
+        eink256Bitmap = null;
+    
+        eink256CacheScale = Float.NaN;
+        eink256CacheTranslateX = Float.NaN;
+        eink256CacheTranslateY = Float.NaN;
+    }
+    
+    /**
+     * Clears only the cached bitmap.
+     */
+    private void clearEink256CacheOnly() {
+    
+        if (eink256Bitmap != null
+                && !eink256Bitmap.isRecycled()) {
+            eink256Bitmap.recycle();
+        }
+    
+        eink256Bitmap = null;
+    }
     /**
      * Helper method for setting the values of a tile matrix array.
      */
@@ -1442,6 +1683,8 @@ public class SubsamplingScaleImageView extends View {
      */
     private synchronized void onTileLoaded() {
         debug("onTileLoaded");
+    
+        clearEink256Cache();
         checkReady();
         checkImageLoaded();
         if (isBaseLayerReady() && bitmap != null) {
@@ -1459,6 +1702,8 @@ public class SubsamplingScaleImageView extends View {
      */
     private synchronized void onImageLoaded(Bitmap bitmap, boolean bitmapIsCached) {
         debug("onImageLoaded");
+    
+        clearEink256Cache();
         // If actual dimensions don't match the declared size, reset everything.
         if (this.sWidth > 0 && this.sHeight > 0 && (this.sWidth != bitmap.getWidth() || this.sHeight != bitmap.getHeight())) {
             reset(false);
@@ -2353,6 +2598,9 @@ public class SubsamplingScaleImageView extends View {
      * @param tileBgColor Background color for tiles.
      */
     public final void setTileBackgroundColor(int tileBgColor) {
+    
+        clearEink256Cache();
+    
         if (Color.alpha(tileBgColor) == 0) {
             tileBgPaint = null;
         } else {
@@ -2360,6 +2608,7 @@ public class SubsamplingScaleImageView extends View {
             tileBgPaint.setStyle(Style.FILL);
             tileBgPaint.setColor(tileBgColor);
         }
+    
         invalidate();
     }
 
