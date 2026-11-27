@@ -1,11 +1,12 @@
 package com.davemorrissey.labs.subscaleview.test.viewpager;
 
 import android.os.Bundle;
+import android.view.View;
+
 import androidx.fragment.app.Fragment;
 import androidx.fragment.app.FragmentManager;
 import androidx.fragment.app.FragmentStatePagerAdapter;
 import androidx.viewpager.widget.ViewPager;
-import android.view.View;
 
 import com.davemorrissey.labs.subscaleview.test.AbstractPagesActivity;
 import com.davemorrissey.labs.subscaleview.test.Page;
@@ -22,7 +23,7 @@ import static com.davemorrissey.labs.subscaleview.test.R.string.pager_title;
 
 public class ViewPagerActivity extends AbstractPagesActivity {
 
-    private static final String[] IMAGES = { "sanmartino.jpg", "swissroad.jpg" };
+    private static final String[] IMAGES = {"sanmartino.jpg", "swissroad.jpg"};
 
     public ViewPagerActivity() {
         super(pager_title, view_pager, Arrays.asList(

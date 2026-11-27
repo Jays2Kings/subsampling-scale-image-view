@@ -1,7 +1,8 @@
 package com.davemorrissey.labs.subscaleview.test.extension;
 
-import androidx.fragment.app.Fragment;
 import android.util.Log;
+
+import androidx.fragment.app.Fragment;
 
 import com.davemorrissey.labs.subscaleview.test.AbstractFragmentsActivity;
 import com.davemorrissey.labs.subscaleview.test.Page;
@@ -27,7 +28,7 @@ public class ExtensionActivity extends AbstractFragmentsActivity {
             ExtensionCircleFragment.class,
             ExtensionFreehandFragment.class
     );
-    
+
     public ExtensionActivity() {
         super(extension_title, fragments_activity, Arrays.asList(
                 new Page(extension_p1_subtitle, extension_p1_text),
